@@ -127,7 +127,7 @@ contract Untron is Ownable, IPaymaster, IUntron {
 
         buyers[order.buyer].liquidity += order.amount - amount;
         fulfilled[fulfillment.txHash] = true;
-        userHealth[order.from]++;
+        userHealth[order.from] += 2;
         emit OrderFulfilled(order);
     }
 
