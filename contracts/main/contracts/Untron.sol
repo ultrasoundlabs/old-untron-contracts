@@ -65,8 +65,12 @@ contract Untron is Ownable, IPaymaster, IUntron {
     uint internal revealFee;
     uint internal minOrderSize;
 
+    address internal paymasterAuthority;
+    mapping(bytes32 => bool) usedApprovals;
+
     constructor(IERC20 _usdc) {
         usdc = _usdc;
+        transferOwnership(msg.sender);
     }
     
     mapping(bytes32 => bytes32) public oldRoots; // blockId -> txRoot
@@ -93,6 +97,10 @@ contract Untron is Ownable, IPaymaster, IUntron {
         minOrderSize = _minOrderSize;
     }
 
+    function setPaymasterAuthority(address _paymasterAuthority) external onlyOwner {
+        paymasterAuthority = _paymasterAuthority;
+    }
+
     function createOrder(address buyer, uint amount) external {
         require(buyers[buyer].active, "db");
         require(amount <= buyers[buyer].liquidity, "il");
@@ -111,7 +119,7 @@ contract Untron is Ownable, IPaymaster, IUntron {
         emit OrderCreated(order);
     }
 
-    function _verifyTronTx(bytes memory _transaction, uint _usdtAmount, address _recipient) internal pure returns (bool) {
+    function _verifyTronTx(bytes memory, uint, address) internal pure returns (bool) {
         // TODO
         return true;
     }
@@ -199,30 +207,31 @@ contract Untron is Ownable, IPaymaster, IUntron {
         external
         payable
         onlyBootloader
-        returns (bytes4 magic, bytes memory)
+        returns (bytes4 magic, bytes memory x)
     {
+        x;
 
         magic = PAYMASTER_VALIDATION_SUCCESS_MAGIC;
-        require(_transaction.paymasterInput.length >= 4);
+
+        address from = address(uint160(_transaction.from));
+        if(_transaction.paymasterInput.length > 4) {
+            (bytes32 hash, uint8 v, bytes32 r, bytes32 s) = abi.decode(_transaction.paymasterInput[4:], (bytes32,uint8,bytes32,bytes32));
+
+            assert(ecrecover(hash, v, r, s) == paymasterAuthority);
+            assert(address(uint160(uint256(hash))) == from);
+
+            userHealth[from]++;
+            usedApprovals[hash] = true;
+        }
 
         require(_transaction.to == uint256(uint160(address(this))));
-        require(isEligibleForPaymaster(address(uint160(_transaction.from))), "lh");
-        userHealth[address(uint160(_transaction.from))]--;
+        require(isEligibleForPaymaster(from), "lh");
+        userHealth[from]--;
 
-        bytes4 paymasterInputSelector = bytes4(
-            _transaction.paymasterInput[0:4]
-        );
-        if (paymasterInputSelector == IPaymasterFlow.general.selector) {
-            uint256 requiredETH = _transaction.gasLimit *
-                _transaction.maxFeePerGas;
-
-            (bool success, ) = payable(BOOTLOADER_FORMAL_ADDRESS).call{
-                value: requiredETH
-            }("");
-            require(success);
-        } else {
-            revert();
-        }
+        (bool success, ) = payable(BOOTLOADER_FORMAL_ADDRESS).call{
+            value: _transaction.gasLimit * _transaction.maxFeePerGas
+        }("");
+        require(success);
     }
 
     function postTransaction(
