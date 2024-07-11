@@ -4,7 +4,9 @@ pragma solidity ^0.8.0;
 import "./IUntronSender.sol";
 
 interface ITronVerifier {
-    function verify(IUntron.TronBlockHeader[19] calldata headers, bytes calldata proof) external returns (bool);
+    function verify(IUntron.TronBlockHeader[19] calldata headers, IUntron.Order[] calldata orders, bytes calldata proof)
+        external
+        returns (bool);
 }
 
 interface IUntron {
@@ -47,9 +49,6 @@ interface IUntron {
     function params() external view returns (Params memory);
     function params(Params calldata __params) external;
 
-    function oldRoots(bytes32) external returns (bytes32);
-    function activeOrders(bytes32) external returns (uint256);
-
     function createOrder(
         address buyer,
         uint256 amount,
@@ -61,15 +60,18 @@ interface IUntron {
         Order calldata _order,
         uint256 usdtAmount,
         bytes calldata transaction,
-        bytes32 blockId,
+        uint256 headerIndex,
         bytes32[] calldata proof
     ) external;
+    function closeOrder(Order calldata order) external;
 
     function setBuyer(address tronAddress, uint256 liquidity, uint256 rate) external;
     function closeBuyer() external;
 
-    function updateRelay(TronBlockHeader[18] calldata _newHeaders, bytes calldata proof) external;
-    function reorgRelay(TronBlockHeader[18][2] calldata cycles, bytes[2] calldata proofs) external;
+    function updateRelay(TronBlockHeader[18] calldata newHeaders, Order[] calldata newOrders, bytes calldata proof)
+        external;
+    function reorgRelay(TronBlockHeader[18][2] calldata cycles, Order[][2] calldata orders, bytes[2] calldata proofs)
+        external;
 
     function isEligibleForPaymaster(address _address) external view returns (bool);
 }

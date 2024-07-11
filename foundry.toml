@@ -11,3 +11,15 @@ fallback_oz = true
 is_system = false
 mode = "3"
 solc = "0.8.20"
+remappings = [
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "ds-test/=lib/openzeppelin-contracts/lib/forge-std/lib/ds-test/src/",
+    "era-contracts/system-contracts/contracts/=lib/v2-testnet-contracts/l2/system-contracts/",
+    "era-contracts/l2-contracts/contracts/=lib/v2-testnet-contracts/l2/contracts/",
+    "era-contracts/l1-contracts/contracts/=lib/v2-testnet-contracts/l1/contracts/",
+    "erc4626-tests/=lib/openzeppelin-contracts/lib/erc4626-tests/",
+    "forge-std/=lib/forge-std/src/",
+    "murky/=lib/era-contracts/l1-contracts/lib/murky/",
+    "openzeppelin-contracts-upgradeable/=lib/era-contracts/l1-contracts/lib/openzeppelin-contracts-upgradeable/",
+    "openzeppelin-contracts/=lib/openzeppelin-contracts/"
+]

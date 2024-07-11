@@ -25,6 +25,7 @@ contract Untron is Ownable, IPaymaster, IUntron {
 
     mapping(bytes32 => bool) internal txSeenBefore; // tron tx hash -> bool (nullifier)
     TronBlockHeader[19] internal pendingHeaders;
+    Order[] internal pendingOrders;
     address internal latestRelayer;
 
     mapping(address => Buyer) internal buyers; // zksync address -> buyer
@@ -46,6 +47,8 @@ contract Untron is Ownable, IPaymaster, IUntron {
         _params = __params;
     }
 
+    constructor() Ownable(msg.sender) {}
+
     function createOrder(
         address buyer,
         uint256 amount,
@@ -61,15 +64,15 @@ contract Untron is Ownable, IPaymaster, IUntron {
             from: msg.sender,
             buyer: buyer,
             tronAddress: buyers[buyer].tronAddress,
-            amount: amount,
-            rate: buyers[buyer].rate,
+            inAmount: amount,
+            outAmount: amount * 1e18 / buyers[buyer].rate / 1e18,
             revealFee: params().revealFee,
             recipient: recipient,
             destinationChain: destinationChain,
             bridgeData: bridgeData
         });
         bytes32 orderHash = keccak256(abi.encode(order));
-        validUntil[orderHash] = orderHash;
+        validUntil[orderHash] = block.timestamp + 300;
 
         emit OrderCreated(order);
     }
@@ -79,27 +82,25 @@ contract Untron is Ownable, IPaymaster, IUntron {
         return true;
     }
 
-    function _fulfillOrders(Fill[] memory fills, address revealer) internal {
-        IUntronSender.SendRequest[] memory requests = new IUntronSender.SendRequest[](fills.length);
+    function _fulfillOrders(Order[] memory orders, address revealer) internal {
+        IUntronSender.SendRequest[] memory requests = new IUntronSender.SendRequest[](orders.length);
         uint256 totalAmount;
         uint256 totalRevealerFee;
 
-        for (uint256 i = 0; i < fills.length; i++) {
-            Fill memory fill = fills[i];
-            Order memory order = fill.order;
+        for (uint256 i = 0; i < orders.length; i++) {
+            Order memory order = orders[i];
 
-            uint256 orderTimeout = activeOrders[keccak256(abi.encode(order))];
+            uint256 orderTimeout = validUntil[keccak256(abi.encode(order))];
             require(orderTimeout <= block.timestamp && orderTimeout != 0, "io");
 
-            uint256 amount = fill.usdtAmount * 1e18 / order.rate / 1e18 - order.revealFee;
-            requests[0] = IUntronSender.SendRequest({
+            uint256 amount = order.outAmount - order.revealFee;
+            requests[i] = IUntronSender.SendRequest({
                 to: order.recipient,
                 amount: amount,
                 chain: order.destinationChain,
                 data: order.bridgeData
             });
 
-            buyers[order.buyer].liquidity += order.amount - amount;
             totalAmount += amount;
             totalRevealerFee += order.revealFee;
             userHealth[order.from]++;
@@ -115,31 +116,29 @@ contract Untron is Ownable, IPaymaster, IUntron {
         Order calldata _order,
         uint256 usdtAmount,
         bytes calldata transaction,
-        bytes32 blockId,
+        uint256 headerIndex,
         bytes32[] calldata proof
     ) external {
         Order memory order = _order;
 
         // this can be ZK proven (see updateRelay())
         bytes32 txHash = sha256(transaction);
-        bytes32 txRoot = oldRoots[blockId];
-        require(MerkleProof.verify(proof, txRoot, txHash), "ne");
+        require(MerkleProof.verify(proof, pendingHeaders[headerIndex].txRoot, txHash), "ne");
 
         require(_verifyTronTx(transaction, usdtAmount, order.tronAddress), "it");
 
-        Fill memory fill = Fill({order: order, usdtAmount: usdtAmount, txHash: txHash});
-        Fill[] memory fills = new Fill[](1);
-        fills[0] = fill;
-        _fulfillOrders(fills, msg.sender);
+        Order[] memory orders = new Order[](1);
+        orders[0] = order;
+        _fulfillOrders(orders, msg.sender);
     }
 
-    function closeOrder(Order order) external {
+    function closeOrder(Order calldata order) external {
         bytes32 orderHash = keccak256(abi.encode(order));
 
         require(!isFulfilled[orderHash]);
         require(validUntil[orderHash] > block.timestamp);
 
-        buyers[order.buyer].liquidity += order.amount;
+        buyers[order.buyer].liquidity += order.outAmount;
     }
 
     function setBuyer(address tronAddress, uint256 liquidity, uint256 rate) external {
@@ -155,38 +154,31 @@ contract Untron is Ownable, IPaymaster, IUntron {
         delete buyers[msg.sender];
     }
 
-    function updateRelay(TronBlockHeader[18] calldata _newHeaders, bytes calldata proof) public {
-        Fill[] memory fills = new Fill[](params().maxTransfersPerCycle);
-        uint256 y = 0;
+    function updateRelay(TronBlockHeader[18] calldata newHeaders, Order[] calldata newOrders, bytes calldata proof)
+        public
+    {
+        _fulfillOrders(pendingOrders, latestRelayer);
 
-        for (uint256 i = 1; i < 18; i++) {
-            TronBlockHeader memory header = newHeaders[i];
-            for (uint256 x = 0; x < header.fills.length; i++) {
-                Fill memory fill = header.fills[x];
-                fills[y] = fill;
-                y++;
-            }
-            oldRoots[header.blockId] = header.txRoot;
-        }
-
-        _fulfillOrders(fills, latestRelayer);
-
-        newHeaders[0] = newHeaders[18];
+        pendingHeaders[0] = pendingHeaders[18];
         for (uint256 i = 0; i < 18; i++) {
-            newHeaders[i + 1] = _newHeaders[i];
+            pendingHeaders[i + 1] = newHeaders[i];
         }
-        require(params().verifier.verify(newHeaders, proof));
+        pendingOrders = newOrders;
+
+        require(params().verifier.verify(pendingHeaders, pendingOrders, proof));
     }
 
-    function reorgRelay(TronBlockHeader[18][2] calldata cycles, bytes[2] calldata proofs) external {
+    function reorgRelay(TronBlockHeader[18][2] calldata cycles, Order[][2] calldata orders, bytes[2] calldata proofs)
+        external
+    {
         TronBlockHeader[18] memory cycle = cycles[0];
 
         for (uint256 i = 1; i < 18; i++) {
-            newHeaders[i + 1] = cycle[i];
+            pendingHeaders[i + 1] = cycle[i];
         }
-        require(params().verifier.verify(newHeaders, proofs[0]));
+        require(params().verifier.verify(pendingHeaders, orders[0], proofs[0]));
 
-        updateRelay(cycles[1], proofs[1]);
+        updateRelay(cycles[1], orders[1], proofs[1]);
     }
 
     function isEligibleForPaymaster(address _address) public view returns (bool) {

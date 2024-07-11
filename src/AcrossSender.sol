@@ -22,21 +22,27 @@ contract AcrossSender is IUntronSender {
         for (uint256 i = 0; i < requests.length; i++) {
             SendRequest calldata request = requests[i];
 
-            uint256 totalRelayFee = abi.decode(request.data, (uint256));
-            spokePool.depositV3(
-                address(this),
-                address(uint160(uint256(request.to))),
-                address(usdc),
-                address(0),
-                request.amount,
-                request.amount - totalRelayFee,
-                request.chain,
-                address(0),
-                uint32(block.timestamp - 36),
-                uint32(block.timestamp + 1800),
-                0,
-                ""
-            );
+            address to = address(uint160(uint256(request.to)));
+
+            if (request.chain == 324) {
+                usdc.transfer(to, request.amount);
+            } else {
+                uint256 totalRelayFee = abi.decode(request.data, (uint256));
+                spokePool.depositV3(
+                    address(this),
+                    to,
+                    address(usdc),
+                    address(0),
+                    request.amount,
+                    request.amount - totalRelayFee,
+                    request.chain,
+                    address(0),
+                    uint32(block.timestamp - 36),
+                    uint32(block.timestamp + 1800),
+                    0,
+                    ""
+                );
+            }
         }
     }
 }
