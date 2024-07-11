@@ -10,23 +10,13 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import "./interfaces/IUntron.sol";
 import "./interfaces/IUntronSender.sol";
-import "./interfaces/IStateProver.sol";
 import "./MerkleProof.sol";
 
 contract Untron is Ownable, IPaymaster, IUntron {
-    ITronVerifier internal verifier;
-    IERC20 immutable usdc;
-
-    uint internal revealFee;
-    uint internal minOrderSize;
-
-    address internal paymasterAuthority;
-    mapping(bytes32 => bool) usedApprovals;
-
-    constructor(IERC20 _usdc) {
-        usdc = _usdc;
-    }
+    IERC20 usdc = IERC20(0x3355df6D4c9C3035724Fd0e3914dE96A5a83aaf4); // USDC.e
     
+    uint public authorityNonce;
+  
     mapping(bytes32 => bytes32) public oldRoots; // blockId -> txRoot
     mapping(bytes32 => bool) internal fulfilled; // tron tx hash -> bool (nullifier)
     TronBlockHeader[19] internal newHeaders;
@@ -39,27 +29,12 @@ contract Untron is Ownable, IPaymaster, IUntron {
     // https://github.com/zkSync-Community-Hub/zksync-developers/discussions/621
     mapping(address => int) internal userHealth; // +1 for each fulfilled order, -1 for each unfulfilled
 
-    mapping(IUntronSender => Fulfillment[]) internal intents;
-    mapping(uint => IUntronSender) public crossChainSenders;
-
-    function setVerifier(ITronVerifier _verifier) external onlyOwner {
-        verifier = _verifier;
+    Params internal _params;
+    function params() public view returns (Params memory) {
+        return _params;
     }
-
-    function setRevealFee(uint _revealFee) external onlyOwner {
-        revealFee = _revealFee;
-    }
-
-    function setMinOrderSize(uint _minOrderSize) external onlyOwner {
-        minOrderSize = _minOrderSize;
-    }
-
-    function setPaymasterAuthority(address _paymasterAuthority) external onlyOwner {
-        paymasterAuthority = _paymasterAuthority;
-    }
-
-    function setSender(uint chain, IUntronSender _crossChainSender) external onlyOwner {
-        crossChainSenders[chain] = _crossChainSender;
+    function params(Params calldata __params) external onlyOwner {
+        _params = __params;
     }
 
     function createOrder(address buyer, uint amount, bytes32 recipient, uint destinationChain, bytes memory bridgeData) external {
@@ -74,11 +49,10 @@ contract Untron is Ownable, IPaymaster, IUntron {
             tronAddress: buyers[buyer].tronAddress,
             amount: amount,
             rate: buyers[buyer].rate,
-            revealFee: revealFee,
+            revealFee: params().revealFee,
 
             recipient: recipient,
             destinationChain: destinationChain,
-            bridge: crossChainSenders[destinationChain],
             bridgeData: bridgeData
         });
         activeOrders[keccak256(abi.encode(order))] = block.timestamp + 600; // 10 mins
@@ -91,23 +65,37 @@ contract Untron is Ownable, IPaymaster, IUntron {
         return true;
     }
 
-    function _queueOrder(Fulfillment memory fulfillment) internal {
+    function _fulfillOrders(Fulfillment[] memory fulfillments, address revealer) internal {
 
-        require(!fulfilled[fulfillment.txHash], "ff");
-        Order memory order = fulfillment.order;
+        IUntronSender.SendRequest[] memory requests = new IUntronSender.SendRequest[](fulfillments.length);
+        uint totalAmount;
+        uint totalRevealerFee;
 
-        intents[fulfillment.order.bridge].push(fulfillment);
+        for (uint i = 0; i < fulfillments.length; i++) {
+            Fulfillment memory fulfillment = fulfillments[i];
+            Order memory order = fulfillment.order;
 
-        uint amount = fulfillment.usdtAmount * 1e18 / order.rate / 1e18 - order.revealFee;
-        buyers[order.buyer].liquidity += order.amount - amount;
-        fulfilled[fulfillment.txHash] = true;
-        userHealth[order.from] += 2;
-        
-        emit OrderFulfilled(fulfillment);
+            uint amount = fulfillment.usdtAmount * 1e18 / order.rate / 1e18 - order.revealFee;
+            requests[0] = IUntronSender.SendRequest({
+                to: order.recipient,
+                amount: amount,
+                chain: order.destinationChain,
+                data: order.bridgeData
+            });
+
+            buyers[order.buyer].liquidity += order.amount - amount;
+            totalAmount += amount;
+            totalRevealerFee += order.revealFee;
+            userHealth[order.from]++;
+        }
+
+        assert(usdc.transfer(address(params().crossChainSender), totalAmount));
+        assert(usdc.transfer(revealer, totalRevealerFee));
+        params().crossChainSender.crossChainSend(requests);
     }
 
     // should only be used when the order was skipped by the relayer
-    function queueOrder(Order calldata _order, uint256 usdtAmount, bytes calldata transaction, bytes32 blockId, bytes32[] calldata proof) external {
+    function fulfillOrder(Order calldata _order, uint256 usdtAmount, bytes calldata transaction, bytes32 blockId, bytes32[] calldata proof) external {
         Order memory order = _order;
 
         // this can be ZK proven (see updateRelay())
@@ -125,29 +113,45 @@ contract Untron is Ownable, IPaymaster, IUntron {
             usdtAmount: usdtAmount,
             txHash: txHash
         });
-        _queueOrder(fulfillment);
-        usdc.transfer(msg.sender, order.revealFee);
+        Fulfillment[] memory fulfillments = new Fulfillment[](1);
+        fulfillments[0] = fulfillment;
+        _fulfillOrders(fulfillments, msg.sender);
+    }
+
+    function setBuyer(address tronAddress, uint liquidity, uint rate) external {
+        assert(usdc.transferFrom(msg.sender, address(this), liquidity));
+        buyers[msg.sender].tronAddress = tronAddress;
+        buyers[msg.sender].liquidity += liquidity;
+        buyers[msg.sender].rate = rate;
+        buyers[msg.sender].active = true;
+    }
+
+    function closeBuyer() external {
+        assert(usdc.transfer(msg.sender, buyers[msg.sender].liquidity));
+        delete buyers[msg.sender];
     }
 
     function updateRelay(TronBlockHeader[18] calldata _newHeaders, bytes calldata proof) public {
-        uint totalRelayerFee = 0;
+        Fulfillment[] memory fulfillments = new Fulfillment[](params().maxTransfersPerCycle);
+        uint y = 0;
+
         for (uint i = 1; i < 18; i++) {
             TronBlockHeader memory header = newHeaders[i];
             for (uint x = 0; x < header.fulfillments.length; i++) {
                 Fulfillment memory fulfillment = header.fulfillments[x];
-                _queueOrder(fulfillment);
-                totalRelayerFee += fulfillment.order.revealFee;
+                fulfillments[y] = fulfillment;
+                y++;
             }
             oldRoots[header.blockId] = header.txRoot;
         }
 
-        usdc.transfer(latestRelayer, totalRelayerFee);
+        _fulfillOrders(fulfillments, latestRelayer);
 
         newHeaders[0] = newHeaders[18];
         for (uint i = 0; i < 18; i++) {
             newHeaders[i+1] = _newHeaders[i];
         }
-        assert(verifier.verify(newHeaders, proof));
+        assert(params().verifier.verify(newHeaders, proof));
     }
 
     function reorgRelay(TronBlockHeader[18][2] calldata cycles, bytes[2] calldata proofs) external {
@@ -156,21 +160,13 @@ contract Untron is Ownable, IPaymaster, IUntron {
         for (uint i = 1; i < 18; i++) {
             newHeaders[i+1] = cycle[i];
         }
-        assert(verifier.verify(newHeaders, proofs[0]));
+        assert(params().verifier.verify(newHeaders, proofs[0]));
 
         updateRelay(cycles[1], proofs[1]);
     }
 
-    function claimIntents(IUntronSender chain, uint limit) external {
-        Fulfillment[] memory transfers = new Fulfillment[](limit);
-        for (uint i = 0; i < (limit | intents[chain].length); i++) {
-            transfers[i] = intents[chain][i];
-        }
-        chain.crossChainSend(transfers);
-    }
-
     function isEligibleForPaymaster(address _address) public view returns (bool) {
-        return userHealth[_address] >= 0;
+        return userHealth[_address] > 0;
     }
 
     modifier onlyBootloader() {
@@ -198,11 +194,12 @@ contract Untron is Ownable, IPaymaster, IUntron {
         if(_transaction.paymasterInput.length > 4) {
             (bytes32 hash, uint8 v, bytes32 r, bytes32 s) = abi.decode(_transaction.paymasterInput[4:], (bytes32,uint8,bytes32,bytes32));
 
-            assert(ecrecover(hash, v, r, s) == paymasterAuthority);
+            assert(ecrecover(hash, v, r, s) == params().paymasterAuthority);
             assert(address(uint160(uint256(hash))) == from);
+            assert(uint256(hash) >> 160 == authorityNonce);
 
             userHealth[from]++;
-            usedApprovals[hash] = true;
+            authorityNonce++;
         }
 
         require(_transaction.to == uint256(uint160(address(this))));

@@ -19,21 +19,25 @@ contract AcrossSender is IUntronSender {
         usdc.approve(address(_spokePool), type(uint).max);
     }
 
-    function crossChainSend(bytes32 to, uint amount, uint chain, bytes calldata data) external {
-        uint totalRelayFee = abi.decode(data, (uint));
-        spokePool.depositV3(
-            address(this),
-            address(uint160(uint256(to))),
-            address(usdc),
-            address(0),
-            amount,
-            amount - totalRelayFee,
-            chain,
-            address(0),
-            uint32(block.timestamp - 36),
-            uint32(block.timestamp + 1800),
-            0,
-            ""
-        );
+    function crossChainSend(SendRequest[] calldata requests) external {
+        for (uint i = 0; i < requests.length; i++) {
+            SendRequest calldata request = requests[i];
+
+            uint totalRelayFee = abi.decode(request.data, (uint));
+            spokePool.depositV3(
+                address(this),
+                address(uint160(uint256(request.to))),
+                address(usdc),
+                address(0),
+                request.amount,
+                request.amount - totalRelayFee,
+                request.chain,
+                address(0),
+                uint32(block.timestamp - 36),
+                uint32(block.timestamp + 1800),
+                0,
+                ""
+            );
+        }
     }
 }
