@@ -4,8 +4,8 @@ pragma solidity ^0.8.0;
 interface IUntronSender {
     struct SendRequest {
         bytes32 to;
-        uint amount;
-        uint chain;
+        uint256 amount;
+        uint256 chain;
         bytes data;
     }
 

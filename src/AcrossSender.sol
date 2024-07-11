@@ -7,7 +7,6 @@ import "./interfaces/IUntronSender.sol";
 import "./interfaces/external/V3SpokePoolInterface.sol";
 
 contract AcrossSender is IUntronSender {
-    
     IERC20 immutable usdc;
     address immutable untron;
     V3SpokePoolInterface immutable spokePool;
@@ -16,14 +15,14 @@ contract AcrossSender is IUntronSender {
         usdc = _usdc;
         untron = _untron;
         spokePool = _spokePool;
-        usdc.approve(address(_spokePool), type(uint).max);
+        usdc.approve(address(_spokePool), type(uint256).max);
     }
 
     function crossChainSend(SendRequest[] calldata requests) external {
-        for (uint i = 0; i < requests.length; i++) {
+        for (uint256 i = 0; i < requests.length; i++) {
             SendRequest calldata request = requests[i];
 
-            uint totalRelayFee = abi.decode(request.data, (uint));
+            uint256 totalRelayFee = abi.decode(request.data, (uint256));
             spokePool.depositV3(
                 address(this),
                 address(uint160(uint256(request.to))),
