@@ -75,6 +75,9 @@ contract Untron is Ownable, IPaymaster, IUntron {
             Fulfillment memory fulfillment = fulfillments[i];
             Order memory order = fulfillment.order;
 
+            uint orderTimeout = activeOrders[keccak256(abi.encode(order))];
+            require(orderTimeout <= block.timestamp && orderTimeout != 0, "io");
+
             uint amount = fulfillment.usdtAmount * 1e18 / order.rate / 1e18 - order.revealFee;
             requests[0] = IUntronSender.SendRequest({
                 to: order.recipient,
@@ -102,9 +105,6 @@ contract Untron is Ownable, IPaymaster, IUntron {
         bytes32 txHash = sha256(transaction);
         bytes32 txRoot = oldRoots[blockId];
         require(MerkleProof.verify(proof, txRoot, txHash), "ne");
-
-        uint orderTimeout = activeOrders[keccak256(abi.encode(order))];
-        require(orderTimeout <= block.timestamp && orderTimeout != 0, "io");
 
         require(_verifyTronTx(transaction, usdtAmount, order.tronAddress), "it");
 
