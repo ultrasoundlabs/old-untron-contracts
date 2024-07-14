@@ -4,14 +4,13 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
+import "./interfaces/ITransferrer.sol";
+import "./MerkleProof.sol";
+
 interface ITronVerifier {
     function verifyCycle(Untron.TronBlockHeader[19] calldata, Untron.Deposit[] calldata, bytes calldata)
         external
         returns (bool);
-}
-
-interface ITransferrer {
-    function processTransfer(uint256, bytes memory) external;
 }
 
 contract Untron is Ownable {
@@ -267,10 +266,29 @@ contract Untron is Ownable {
         updateRelay(cycles[1], _deposits[1], proofs[1]);
     }
 
-    function verifyTx(bytes32, Deposit memory, bytes memory) internal pure returns (bool) {
-        // TODO: inclusion proof verification
-        return true;
+    function verifyTx(bytes32 txRoot, Deposit memory, bytes memory proof) internal pure returns (bool success) {
+        (bytes memory tronTx, bytes32[] memory merkleProof) = abi.decode(proof, (bytes, bytes32[]));
+
+        bytes32 txHash = sha256(tronTx);
+        require(MerkleProof.verify(merkleProof, txRoot, txHash));
+
+        // TODO: verify transaction body
+
+        success = true;
     }
+
+    function supplyRelayer(address relayer) external payable {
+        relayerStakes[relayer] += msg.value;
+    }
+
+    function closeRelayer() external {
+        (bool s,) = payable(msg.sender).call{value: relayerStakes[msg.sender]}("");
+        require(s);
+
+        relayerStakes[msg.sender] = 0;
+    }
+
+    // Tools
 
     function usdtToUsdc(uint256 usdtAmount, uint256 rate) internal pure returns (uint256) {
         return usdtAmount * rate / 1e6;
